@@ -25,6 +25,7 @@ import {
   parseGatewayConnectionEndpoint,
 } from '../access/device-connection.mjs'
 import { replaySession } from '../session/session-replay.mjs'
+import { normalizeOwnerId } from '../access/gateway-access.mjs'
 
 /** Register HTTP adapters using already-assembled services; owns no service lifecycle. */
 export function registerGatewayHttpRoutes(app, {
@@ -206,8 +207,23 @@ export function registerGatewayHttpRoutes(app, {
         code: 'gateway_connection_endpoint_required',
       })
     }
+    // A local telephony host issues one credential per counterparty number, so
+    // it may name the owner explicitly. Remote callers cannot: they always stay
+    // pinned to their own identity.
+    let ownerId = req.identity.ownerId
+    const requestedOwnerId = String(req.body?.owner_id || '').trim()
+    if (requestedOwnerId) {
+      try {
+        ownerId = normalizeOwnerId(requestedOwnerId)
+      } catch (error) {
+        return res.status(400).json({
+          error: error.message,
+          code: 'gateway_owner_id_invalid',
+        })
+      }
+    }
     const issued = gatewayAccessRuntime.issueDeviceCredential({
-      ownerId: req.identity.ownerId,
+      ownerId,
       // Direct issuance always allocates a fresh device identity. A caller may
       // describe the client, but cannot rotate an existing record by reusing ID.
       device: {
@@ -215,7 +231,12 @@ export function registerGatewayHttpRoutes(app, {
         label: req.body?.device?.label,
       },
     })
-    return res.status(201).json(gatewayDeviceConnectionResponse({ endpoint, issued }))
+    return res.status(201).json({
+      ...gatewayDeviceConnectionResponse({ endpoint, issued }),
+      // The token travels inside connection_code for browser clients; a local
+      // host caller needs it directly to dial /api/realtime itself.
+      token: issued.token,
+    })
   })
 
   app.delete('/api/access/devices/:id', (req, res) => {

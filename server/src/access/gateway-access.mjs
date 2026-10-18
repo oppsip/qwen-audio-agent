@@ -39,7 +39,7 @@ function digest(value) {
   return createHash('sha256').update(String(value)).digest('base64url')
 }
 
-function normalizeOwnerId(value) {
+export function normalizeOwnerId(value) {
   const normalized = clean(value)
   if (!OWNER_ID_PATTERN.test(normalized)) {
     throw new Error(`Gateway 远程访问 ownerId 无效：${normalized}`)

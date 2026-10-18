@@ -230,7 +230,7 @@ test('protects remote HTTP access and completes one-time device pairing', async 
       Host: 'gateway.example.test',
       Authorization: `Bearer ${accessToken}`,
     },
-    body: { device: { label: 'must-not-exist' } },
+    body: { owner_id: 'user_attacker', device: { label: 'must-not-exist' } },
   })
   assert.equal(remoteIssueDenied.status, 403)
   const issued = await requestJson({
@@ -252,6 +252,39 @@ test('protects remote HTTP access and completes one-time device pairing', async 
   assert.equal('native_connection_code' in issued.body, false)
   const storedDevices = readFileSync(join(directory, 'gateway-devices.json'), 'utf8')
   assert.equal(storedDevices.includes(direct.access_token), false)
+  // A local telephony host pins one owner per counterparty number and needs the
+  // raw token back, because it dials /api/realtime itself.
+  const telephony = await requestJson({
+    port,
+    path: '/api/access/devices',
+    method: 'POST',
+    headers: { Host: `127.0.0.1:${port}` },
+    body: { owner_id: 'user_13800001111', device: { type: 'telephony', label: '13800001111' } },
+  })
+  assert.equal(telephony.status, 201)
+  assert.equal(telephony.body.device.ownerId, 'user_13800001111')
+  assert.equal(telephony.body.device.type, 'telephony')
+  // Device tokens are 16 random bytes (22 base64url chars).
+  assert.match(telephony.body.token, /^[A-Za-z0-9_-]{16,256}$/)
+  assert.equal(readFileSync(join(directory, 'gateway-devices.json'), 'utf8').includes(telephony.body.token), false)
+  const telephonyAuthenticated = await requestJson({
+    port,
+    path: '/api/health',
+    headers: {
+      Host: 'gateway.example.test',
+      Authorization: `Bearer ${telephony.body.token}`,
+    },
+  })
+  assert.equal(telephonyAuthenticated.status, 200)
+  const invalidOwner = await requestJson({
+    port,
+    path: '/api/access/devices',
+    method: 'POST',
+    headers: { Host: `127.0.0.1:${port}` },
+    body: { owner_id: 'not-an-owner', device: { type: 'telephony' } },
+  })
+  assert.equal(invalidOwner.status, 400)
+  assert.equal(invalidOwner.body.code, 'gateway_owner_id_invalid')
   const directAuthenticated = await requestJson({
     port,
     path: '/api/health',
