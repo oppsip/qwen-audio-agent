@@ -533,7 +533,14 @@ export function createRealtimeSessionRuntime({
     ensurePermissionResponseFor,
     reportFrontendError,
     onSpeechStarted: fields => {
-      connectionLogger.info('realtime.provider.speech_started', fields)
+      // How long after the last uplink frame the provider's VAD reported
+      // speech. This is the barge-in leg nobody can shorten locally: it bounds
+      // how fast playback.clear can reach the client.
+      const lastInputAt = Number(realtimeSession.provider()?.lastInputAudioAt) || 0
+      connectionLogger.info('realtime.provider.speech_started', {
+        ...fields,
+        sinceLastInputAudioMs: lastInputAt ? Math.max(0, Date.now() - lastInputAt) : null,
+      })
       observeSessionAudio({ type: 'speech_started', ...fields })
     },
     onSpeechStopped: fields => {
@@ -559,6 +566,11 @@ export function createRealtimeSessionRuntime({
     announcementQuietMs: config.announcementQuietMs,
     responseContextCleanupMs: RESPONSE_CONTEXT_CLEANUP_MS,
     turnCitations,
+    outputPacing: config.realtimeOutputPacing,
+    onResponseAudioStats: stats => connectionLogger.info(
+      'realtime.response.audio_pacing',
+      stats,
+    ),
   })
 
   taskCoordinator.start()

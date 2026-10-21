@@ -40,6 +40,22 @@ WebUI 和 TUI 只展示当前生效模型，不单独覆盖。
   重建上游 Realtime Session，客户端连接和 Gateway 会话保持不变。
 - 话轮检测为 `smart_turn`（语义判停），由运行时配置，不暴露手动 VAD 调参。
 
+## 出流限速
+
+部分 Realtime 模型会在几秒内把整段回答的音频推完（实测约为实时的 2~3.5 倍），
+而语音只能按 1 倍速播放。Gateway 会把超出实时进度的音频留在本地、按 1 倍速释放给
+客户端，避免客户端积压几十秒语音（也会撑爆 Gateway 的 WebSocket 音频预算）：
+
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING=0` 关闭，默认开启；对本来就按实时出流的模型无副作用
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING_RATE` 释放倍率，默认 `1`
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING_MAX_SECONDS` 本地最多保留的音频秒数，默认 `120`；
+  超出时丢弃最旧的音频并记录 `realtime.response.audio_pacing`
+
+每条响应结束时会打一行 `realtime.response.audio_pacing`：`realtimeFactor` 是模型的出流
+倍率，`queuedSeconds` 是限速当前压住的积压；用户打断时 `paced_cancelled` 给出丢弃的秒数。
+`realtime.provider.speech_started` 里的 `sinceLastInputAudioMs` 是从最后一帧上行音频到
+云端 VAD 判定开口的耗时，可用来衡量打断延迟。
+
 ## 端点覆盖
 
 用于私有化部署或代理：

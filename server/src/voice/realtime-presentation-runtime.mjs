@@ -12,6 +12,7 @@ import {
   containsReservedProtocolEnvelope,
 } from './response-guards/reserved-protocol-envelope.mjs'
 import { realtimeResponseId } from './response-lifecycle.mjs'
+import { ResponseOutputPacer, pcm16Seconds } from './response-output-pacer.mjs'
 
 const PRESENTATION_RESPONSE_EVENTS = new Set([
   'response.created',
@@ -77,6 +78,8 @@ export class RealtimePresentationRuntime {
     announcementQuietMs,
     responseContextCleanupMs,
     turnCitations = null,
+    outputPacing = null,
+    onResponseAudioStats = () => {},
   }) {
     this.ownerId = ownerId
     this.sessionId = sessionId
@@ -94,6 +97,20 @@ export class RealtimePresentationRuntime {
     this.announcementQuietMs = announcementQuietMs
     this.responseContextCleanupMs = responseContextCleanupMs
     this.turnCitations = turnCitations
+    this.onResponseAudioStats = onResponseAudioStats
+    this.outputPacing = outputPacing && outputPacing.enabled !== false
+      ? {
+          rate: Number(outputPacing.rate) > 0 ? Number(outputPacing.rate) : 1,
+          maxQueuedSeconds: Number(outputPacing.maxQueuedSeconds) > 0
+            ? Number(outputPacing.maxQueuedSeconds)
+            : 120,
+          now: outputPacing.now,
+          setTimer: outputPacing.setTimer,
+          clearTimer: outputPacing.clearTimer,
+        }
+      : null
+    this.pacers = new Map()
+    this.audioStats = new Map()
     this.contexts = new Map()
     this.playbackTurns = new Map()
     this.lastCorrectionTurn = null
@@ -243,27 +260,91 @@ export class RealtimePresentationRuntime {
     )
   }
 
+  #pacerFor(id) {
+    if (!this.outputPacing || !id) return null
+    let pacer = this.pacers.get(id)
+    if (!pacer) {
+      pacer = new ResponseOutputPacer({
+        id,
+        rate: this.outputPacing.rate,
+        maxQueuedSeconds: this.outputPacing.maxQueuedSeconds,
+        now: this.outputPacing.now,
+        setTimer: this.outputPacing.setTimer,
+        clearTimer: this.outputPacing.clearTimer,
+        onDrop: drop => this.onResponseAudioStats({
+          type: 'paced_dropped',
+          responseId: id,
+          ...drop,
+        }),
+      })
+      this.pacers.set(id, pacer)
+    }
+    return pacer
+  }
+
+  /**
+   * Provider output can arrive far faster than it can be played. Queue it
+   * behind a real-time clock here so the client never has to hold a long
+   * backlog, which a barge-in would otherwise throw away unsent.
+   */
+  #sendPaced(id, event, seconds = 0) {
+    const pacer = this.#pacerFor(id)
+    if (!pacer) {
+      this.send(event)
+      return
+    }
+    if (pacer.closed) {
+      // A cancelled response never resumes. Terminal bookkeeping still goes
+      // out; queued audio must not leak to the client after the clear.
+      if (seconds > 0) return
+      this.send(event)
+      return
+    }
+    pacer.push({ seconds, send: () => this.send(event) })
+  }
+
+  #dropPaced(id, reason) {
+    const pacer = this.pacers.get(id)
+    if (!pacer || pacer.closed) return null
+    const result = pacer.flush(reason)
+    if (result.droppedSeconds > 0) {
+      this.onResponseAudioStats({
+        type: 'paced_cancelled',
+        responseId: id,
+        ...result,
+      })
+    }
+    return result
+  }
+
   #audioDelta(event) {
     const id = realtimeResponseId(event)
     const context = this.#contextFor(event)
     if (context?.suppressed) return
     const responseTurnId = context.turnId || this.turns.turnId
+    const sampleRate = Number(event.sampleRate)
+      || this.getFrontend().provider.outputSampleRate
+    const seconds = pcm16Seconds(event.delta, sampleRate)
     if (id) {
       context.hasAudio = true
+      const stats = this.audioStats.get(id) || { seconds: 0, firstAt: 0, lastAt: 0 }
+      stats.seconds += seconds
+      if (!stats.firstAt) stats.firstAt = Date.now()
+      stats.lastAt = Date.now()
+      this.audioStats.set(id, stats)
       this.playbackTurns.set(id, responseTurnId)
       this.announcementWindow.queueAudio(id, {
         turnId: responseTurnId,
         origin: context.origin || 'model',
       })
     }
-    this.send({
+    this.#sendPaced(id, {
       type: GatewayServerEvent.AUDIO_DELTA,
       audio: event.delta,
-      sampleRate: Number(event.sampleRate)
-        || this.getFrontend().provider.outputSampleRate,
+      sampleRate,
       responseId: id,
       turnId: responseTurnId,
-    })
+    }, seconds)
   }
 
   #audioTranscriptDelta(event) {
@@ -353,6 +434,9 @@ export class RealtimePresentationRuntime {
       && !suppressToolFollowUp,
     )
     if (context) context.awaitsToolFollowUp = toolFollowUpPending
+    // A failed/cancelled response has no playback left to schedule; drop the
+    // queued burst before the terminal events go out.
+    if (failed) this.#dropPaced(id, responseStatus)
     const guardDecision = evaluateResponseGuards({
       origin: context?.origin || 'model',
       hasFunctionCall: Boolean(context?.hasFunctionCall),
@@ -361,7 +445,7 @@ export class RealtimePresentationRuntime {
       transcript: context?.assistantTranscript || '',
     })
     if (!context?.suppressed) {
-      this.send({
+      this.#sendPaced(id, {
         type: GatewayServerEvent.AUDIO_DONE,
         responseId: id,
         turnId: responseTurnId,
@@ -412,6 +496,7 @@ export class RealtimePresentationRuntime {
         this.announcements.confirmMany(contextTaskIds(context))
       }
       this.contexts.delete(id)
+      this.pacers.delete(id)
     }
     if (failed && id) {
       this.playbackTurns.delete(id)
@@ -438,6 +523,30 @@ export class RealtimePresentationRuntime {
     }))
     if (guardDecision) this.#requestGuardCorrection(guardDecision, context, responseTurnId)
     this.#flushAnnouncementsSoon()
+    this.#reportAudioStats(id, responseStatus)
+  }
+
+  /**
+   * How much audio one provider response produced and how fast it arrived.
+   * A realtime factor far above 1 means the client would otherwise hold a
+   * long backlog; the queued figure is what pacing is holding back right now.
+   */
+  #reportAudioStats(id, status) {
+    const stats = this.audioStats.get(id)
+    if (!stats) return
+    this.audioStats.delete(id)
+    const burstMs = stats.firstAt ? Math.max(1, Date.now() - stats.firstAt) : 0
+    this.onResponseAudioStats({
+      type: 'response',
+      responseId: id,
+      status: status || '',
+      audioSeconds: Number(stats.seconds.toFixed(3)),
+      burstMs,
+      realtimeFactor: burstMs
+        ? Number((stats.seconds / (burstMs / 1000)).toFixed(2))
+        : 0,
+      queuedSeconds: Number((this.pacers.get(id)?.queuedSeconds || 0).toFixed(3)),
+    })
   }
 
   #requestGuardCorrection(decision, context, responseTurnId) {
@@ -497,7 +606,7 @@ export class RealtimePresentationRuntime {
         ...context,
       })
     }
-    this.send({
+    this.#sendPaced(id, {
       type: final
         ? GatewayServerEvent.TRANSCRIPT_FINAL
         : GatewayServerEvent.TRANSCRIPT_DELTA,
@@ -529,6 +638,7 @@ export class RealtimePresentationRuntime {
       && context.transcriptDone
     ) {
       this.contexts.delete(id)
+      this.pacers.delete(id)
     }
   }
 
@@ -536,6 +646,8 @@ export class RealtimePresentationRuntime {
     const timer = setTimeout(() => {
       if (this.contexts.get(id) !== context) return
       this.contexts.delete(id)
+      this.pacers.delete(id)
+      this.audioStats.delete(id)
       this.playbackTurns.delete(id)
       this.announcementWindow.finishPlayback(id, {
         awaitsToolFollowUp: awaitsToolFollowUp(context),
@@ -639,6 +751,9 @@ export class RealtimePresentationRuntime {
   cancelPlayback(id, { reason = '' } = {}) {
     const context = this.contexts.get(id)
     if (context?.suppressed && context.playbackEnded) return
+    // Whatever the provider already produced but the client has not heard is
+    // discarded together with the playback it belongs to.
+    this.#dropPaced(id, reason || 'cancelled')
     this.announcementWindow.finishPlayback(id, {
       awaitsToolFollowUp: false,
     })
@@ -688,11 +803,14 @@ export class RealtimePresentationRuntime {
   failResponse(event) {
     const id = realtimeResponseId(event)
     const context = this.contexts.get(id)
+    // The response never completed, so nothing it produced should still play.
+    this.#dropPaced(id, 'failed')
     if (context?.origin === 'announcement') {
       this.send({ type: GatewayServerEvent.PLAYBACK_CLEAR })
       this.announcementWindow.finishPlayback(id)
       this.playbackTurns.delete(id)
       this.contexts.delete(id)
+      this.pacers.delete(id)
       this.announcements.retryMany(contextTaskIds(context))
     } else {
       if (id && context?.hasAudio) {
@@ -704,6 +822,7 @@ export class RealtimePresentationRuntime {
         this.#scheduleContextCleanup(id, context)
       } else if (id) {
         this.contexts.delete(id)
+        this.pacers.delete(id)
         this.playbackTurns.delete(id)
       }
       this.announcementWindow.responseDone({
@@ -718,6 +837,9 @@ export class RealtimePresentationRuntime {
   }
 
   clear() {
+    for (const pacer of this.pacers.values()) pacer.flush('session_closed')
+    this.pacers.clear()
+    this.audioStats.clear()
     this.contexts.clear()
     this.playbackTurns.clear()
   }

@@ -149,6 +149,9 @@ export class RealtimeFrontend {
     this.recentContextInjected = false
     this.restoringContext = false
     this.audioInputStarted = false
+    // Wall clock of the most recent uplink append; lets the session log how
+    // long the provider's VAD took to report speech.
+    this.lastInputAudioAt = 0
     this.activeResponses = new Set()
     this.pendingResponses = []
     this.retryingResponses = new Set()
@@ -376,6 +379,7 @@ export class RealtimeFrontend {
   appendAudio(audio) {
     this.send(this.protocol.audioAppend(audio), { audio: true })
     this.audioInputStarted = true
+    this.lastInputAudioAt = Date.now()
   }
 
   appendImage(image) {

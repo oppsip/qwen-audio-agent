@@ -273,6 +273,22 @@ export const config = {
   audioVoice: realtimeConnections['dashscope'].voice,
   dashscopeApiKey: realtimeConnections['dashscope'].credential,
   audioRealtimeBaseUrl: realtimeConnections['dashscope'].endpoint,
+  // Realtime providers may deliver audio several times faster than it can be
+  // played. Pace the client-facing stream at roughly real time so a bursty
+  // model cannot leave tens of seconds queued behind the caller (and cannot
+  // overflow the Gateway WebSocket audio budget).
+  realtimeOutputPacing: {
+    enabled: featureEnabled(process.env.QWEN_AUDIO_REALTIME_OUTPUT_PACING),
+    rate: numberSetting(process.env.QWEN_AUDIO_REALTIME_OUTPUT_PACING_RATE, 1, {
+      min: 0.5,
+      max: 4,
+    }),
+    maxQueuedSeconds: numberSetting(
+      process.env.QWEN_AUDIO_REALTIME_OUTPUT_PACING_MAX_SECONDS,
+      120,
+      { min: 5, max: 600 },
+    ),
+  },
   stepfunApiKey: realtimeConnections['stepfun'].credential,
   stepfunRealtimeUrl: realtimeConnections['stepfun'].endpoint,
   stepfunModel: realtimeConnections['stepfun'].model,

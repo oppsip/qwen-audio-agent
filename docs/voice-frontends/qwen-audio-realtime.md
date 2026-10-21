@@ -46,6 +46,28 @@ WebUI and TUI only display the active model; they never override it.
 - Turn detection: `smart_turn` (semantic end-of-turn), configured by the
   runtime; no manual VAD tuning is exposed.
 
+## Output pacing
+
+Some Realtime models deliver a whole answer in a few seconds (measured at
+2–3.5× real time) while speech can only play at 1×. The Gateway keeps the
+surplus locally and releases it at real time, so the client never holds tens of
+seconds of queued speech (which would also overflow the Gateway WebSocket audio
+budget):
+
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING=0` disables pacing; it is on by default
+  and is a no-op for models that already stream at real time
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING_RATE` release rate, default `1`
+- `QWEN_AUDIO_REALTIME_OUTPUT_PACING_MAX_SECONDS` local queue cap in seconds,
+  default `120`; the oldest audio is dropped beyond it and reported as
+  `realtime.response.audio_pacing`
+
+Each finished response logs `realtime.response.audio_pacing`, where
+`realtimeFactor` is how much faster the provider streamed and `queuedSeconds`
+is what pacing is holding back; a barge-in logs `paced_cancelled` with the
+discarded seconds. `sinceLastInputAudioMs` in
+`realtime.provider.speech_started` is the time from the last uplink frame to the
+provider VAD reporting speech — the barge-in leg the Gateway cannot shorten.
+
 ## Endpoint overrides
 
 For private deployments or proxies:

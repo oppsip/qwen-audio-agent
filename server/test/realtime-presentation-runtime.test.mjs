@@ -9,10 +9,27 @@ function harness({
   terminalToolResponses = [],
   resultSummaryResponses = [],
   perResponseInstructions = false,
+  pacing = null,
 } = {}) {
   const events = []
   const records = []
   const calls = []
+  let clock = 0
+  let nextTimer = 1
+  const timers = new Map()
+  const advance = milliseconds => {
+    const target = clock + milliseconds
+    for (;;) {
+      const due = [...timers.entries()]
+        .filter(([, timer]) => timer.at <= target)
+        .sort((a, b) => a[1].at - b[1].at)[0]
+      if (!due) break
+      timers.delete(due[0])
+      clock = due[1].at
+      due[1].callback()
+    }
+    clock = target
+  }
   const turns = new RealtimeTurnState({
     createVoiceTurnId: generation => `voice-${generation}`,
   })
@@ -63,6 +80,21 @@ function harness({
     announcementQuietMs: 60_000,
     responseContextCleanupMs: 60_000,
     turnCitations,
+    outputPacing: pacing
+      ? {
+          enabled: true,
+          maxQueuedSeconds: pacing.maxQueuedSeconds ?? 120,
+          now: () => clock,
+          setTimer: (callback, delay) => {
+            const id = nextTimer
+            nextTimer += 1
+            timers.set(id, { at: clock + delay, callback })
+            return id
+          },
+          clearTimer: id => timers.delete(id),
+        }
+      : null,
+    onResponseAudioStats: stats => calls.push(['responseAudioStats', stats]),
   })
   return {
     runtime,
@@ -70,6 +102,7 @@ function harness({
     events,
     records,
     calls,
+    advance,
     setResponseTurnCandidate(value) {
       responseTurnCandidate = value
     },
@@ -464,4 +497,112 @@ test('a provider failure retries an undelivered announcement', () => {
     calls.find(([name]) => name === 'retryMany'),
     ['retryMany', ['work-1']],
   )
+})
+
+function pcm(seconds, sampleRate = 24000) {
+  return Buffer.alloc(Math.round(seconds * sampleRate) * 2).toString('base64')
+}
+
+test('output pacing releases a provider burst at real time', () => {
+  const { runtime, events, advance } = harness({ pacing: {} })
+  const audioEvents = () => events.filter(event => event.type === 'audio.delta')
+  for (let index = 0; index < 3; index += 1) {
+    deliver(runtime, {
+      type: 'response.audio.delta',
+      response_id: 'response-1',
+      delta: pcm(0.5),
+      sampleRate: 24000,
+    })
+  }
+  assert.equal(audioEvents().length, 1)
+  advance(499)
+  assert.equal(audioEvents().length, 1)
+  advance(1)
+  assert.equal(audioEvents().length, 2)
+  advance(500)
+  assert.equal(audioEvents().length, 3)
+})
+
+test('cancelling a paced response drops audio that was never released', () => {
+  const { runtime, events, advance } = harness({ pacing: {} })
+  const audioEvents = () => events.filter(event => event.type === 'audio.delta')
+  for (let index = 0; index < 4; index += 1) {
+    deliver(runtime, {
+      type: 'response.audio.delta',
+      response_id: 'response-1',
+      delta: pcm(0.5),
+      sampleRate: 24000,
+    })
+  }
+  assert.equal(audioEvents().length, 1)
+  runtime.clearPlayback({ reason: 'user_interruption' })
+  advance(10_000)
+  assert.equal(audioEvents().length, 1)
+})
+
+test('paced audio.done trails the audio it closes', () => {
+  const { runtime, events, advance } = harness({ pacing: {} })
+  const doneEvents = () => events.filter(event => event.type === 'audio.done')
+  for (let index = 0; index < 3; index += 1) {
+    deliver(runtime, {
+      type: 'response.audio.delta',
+      response_id: 'response-1',
+      delta: pcm(0.5),
+      sampleRate: 24000,
+    })
+  }
+  deliver(runtime, {
+    type: 'response.done',
+    response: { id: 'response-1', status: 'completed' },
+  })
+  assert.equal(doneEvents().length, 0)
+  advance(1000)
+  assert.equal(doneEvents().length, 0)
+  advance(500)
+  assert.equal(doneEvents().length, 1)
+})
+
+test('paced transcripts follow the voice instead of leading it', () => {
+  const { runtime, events, advance } = harness({ pacing: {} })
+  deliver(runtime, {
+    type: 'response.audio.delta',
+    response_id: 'response-1',
+    delta: pcm(0.5),
+    sampleRate: 24000,
+  })
+  runtime.startPlayback('response-1')
+  deliver(runtime, {
+    type: 'response.audio_transcript.delta',
+    response_id: 'response-1',
+    delta: '你好',
+  })
+  const transcripts = () => events.filter(event => event.type === 'transcript.delta')
+  assert.equal(transcripts().length, 0)
+  advance(500)
+  assert.equal(transcripts().length, 1)
+})
+
+test('pacing reports how much faster the provider streamed', () => {
+  const { runtime, calls, advance } = harness({ pacing: {} })
+  deliver(runtime, {
+    type: 'response.audio.delta',
+    response_id: 'response-1',
+    delta: pcm(2),
+    sampleRate: 24000,
+  })
+  deliver(runtime, {
+    type: 'response.audio.delta',
+    response_id: 'response-1',
+    delta: pcm(2),
+    sampleRate: 24000,
+  })
+  deliver(runtime, {
+    type: 'response.done',
+    response: { id: 'response-1', status: 'completed' },
+  })
+  const stats = calls.find(([name]) => name === 'responseAudioStats')[1]
+  assert.equal(stats.audioSeconds, 4)
+  assert.equal(stats.queuedSeconds, 2)
+  assert.ok(stats.realtimeFactor > 1)
+  advance(5000)
 })
