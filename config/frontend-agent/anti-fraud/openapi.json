@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "apis": {
+    "blocklist": {
+      "enabled": true,
+      "document": "./blocklist.openapi.yaml",
+      "baseUrl": "http://127.0.0.1:8099/gw/__INTERNAL_TOKEN__",
+      "operations": {
+        "checkBlocklist": {
+          "enabled": true,
+          "description": "查询当前来电号码是否已被主人标记为骚扰/诈骗。来电开始后先查一次；已标记则按防骚扰规则告诫对方不要再拨。",
+          "maxCallsPerTurn": 2
+        },
+        "addToBlocklist": {
+          "enabled": true,
+          "description": "把当前来电号码标记为主人的骚扰(spam)/诈骗(fraud)黑名单。仅在确认对方是骚扰或诈骗时调用。",
+          "maxCallsPerTurn": 1
+        }
+      }
+    }
+  }
+}

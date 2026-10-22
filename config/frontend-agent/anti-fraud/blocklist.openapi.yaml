@@ -1,0 +1,85 @@
+openapi: 3.0.3
+info:
+  title: BFF Blocklist (loopback)
+  version: 1.0.0
+  description: |
+    主人（BFF 用户）的黑名单查询与标记。归属用户由 BFF 根据通话记录反查，
+    调用方不需要、也不能传 user_id。
+paths:
+  /blocklist/check:
+    get:
+      operationId: checkBlocklist
+      summary: 查询号码是否在主人黑名单
+      parameters:
+        - name: number
+          in: query
+          required: true
+          description: 本次来电号码，只传数字，例如 13800138000。
+          schema:
+            type: string
+            pattern: '^[0-9]{3,31}$'
+      responses:
+        '200':
+          description: 查询成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  blocked:
+                    type: boolean
+                  number:
+                    type: string
+                  reason:
+                    type: string
+                    enum: [spam, fraud, manual]
+                  count:
+                    type: integer
+                  spam_policy:
+                    type: string
+                    enum: [talk, warn, block]
+        '404':
+          description: 该号码没有通话记录，无法确定归属用户
+  /blocklist/add:
+    post:
+      operationId: addToBlocklist
+      summary: 把号码加入主人黑名单
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [number, reason]
+              additionalProperties: false
+              properties:
+                number:
+                  type: string
+                  pattern: '^[0-9]{3,31}$'
+                  description: 本次来电号码，只传数字。
+                reason:
+                  type: string
+                  enum: [spam, fraud]
+                  description: spam=骚扰推销，fraud=诈骗。
+      responses:
+        '200':
+          description: 标记成功
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  number:
+                    type: string
+                  reason:
+                    type: string
+                  count:
+                    type: integer
+                  blocked:
+                    type: boolean
+        '404':
+          description: 该号码没有通话记录，无法确定归属用户
