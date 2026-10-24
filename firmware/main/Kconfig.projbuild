@@ -1,0 +1,172 @@
+menu "OTA Configuration"
+
+    config OTA_MANIFEST_URL
+        string "OTA version manifest URL"
+        default ""
+        help
+            HTTPS URL of the version manifest JSON file served by your update server.
+            Example: https://ota.example.com/au_gw/version.json
+
+            The manifest must be a JSON object with fields:
+              "version" : "major.minor.patch"  (string)
+              "url"     : "https://..."        (firmware binary URL)
+              "sha256"  : "64-char hex"        (SHA-256 of firmware binary)
+
+            Leave empty to disable automatic OTA on boot.
+
+endmenu
+
+menu "Platform Configuration"
+
+    config PLATFORM_BASE_URL
+        string "Device platform base URL"
+        default ""
+        help
+            Origin of the BLU-SIP device platform (no trailing path).
+            Example: https://iot.example.com   or   http://192.168.1.10:8080
+
+            Used for device registration and schema-driven web/APP config.
+            Leave empty to disable web config (BLE-only fallback).
+
+endmenu
+
+menu "Device Default Configuration"
+
+    comment "Factory defaults used when NVS has no saved value (first boot / factory reset)"
+    comment "Runtime changes via web / BLE / APP are stored in NVS and override these"
+
+    menu "Wi-Fi"
+
+        config GW_WIFI_SSID
+            string "Default Wi-Fi SSID"
+            default ""
+            help
+                Station SSID used until the user saves a different one.
+
+        config GW_WIFI_PASSWORD
+            string "Default Wi-Fi password"
+            default ""
+            help
+                Station password. Stored in firmware; prefer setting this only
+                for factory images, not public builds.
+
+    endmenu
+
+    menu "Ethernet"
+
+        config GW_ETH_DHCP
+            bool "Default Ethernet DHCP"
+            default y
+            help
+                Yes: obtain IPv4 via DHCP. No: use the static address below.
+
+        config GW_ETH_IP
+            string "Default Ethernet IPv4 address"
+            default ""
+            help
+                Used when DHCP is off. Example: 192.168.1.50
+
+        config GW_ETH_NETMASK
+            string "Default Ethernet netmask"
+            default "255.255.255.0"
+
+        config GW_ETH_GATEWAY
+            string "Default Ethernet gateway"
+            default ""
+
+        config GW_ETH_DNS
+            string "Default Ethernet DNS"
+            default ""
+
+    endmenu
+
+    menu "Qwen Audio Agent"
+
+        config GW_QWEN_HOST
+            string "Default Qwen Gateway / device-relay host"
+            default ""
+            help
+                Hostname of the HTTPS Gateway, or the address of a trusted
+                LAN device-relay (examples/ai-passport).
+
+        config GW_QWEN_PORT
+            int "Default WebSocket port"
+            default 3101
+            range 1 65535
+
+        config GW_QWEN_PATH
+            string "Default WebSocket path"
+            default "/api/realtime"
+
+        config GW_QWEN_TOKEN
+            string "Default device access token"
+            default ""
+            help
+                Use QWEN_AUDIO_GATEWAY_ACCESS_TOKEN for direct Gateway access,
+                or DEVICE_ACCESS_TOKEN for the LAN relay. Not a DashScope API key.
+
+        config GW_QWEN_TLS
+            bool "Use TLS (wss://)"
+            default n
+            help
+                Enable for public Gateway access. WSS verifies the server
+                certificate chain and hostname using the ESP-IDF CA bundle.
+
+        config GW_QWEN_AUTO_SESSION
+            bool "Auto-start Qwen session when a headset/speaker connects"
+            default y
+
+    endmenu
+
+    menu "Bluetooth"
+
+        config GW_BT_DEVICE_NAME
+            string "Default Bluetooth device name"
+            default ""
+            help
+                Name advertised by this gateway. Leave empty to use
+                "<prefix>-XXXXXX" from the Bluetooth MAC.
+
+        config GW_BT_DEVICE_PREFIX
+            string "Bluetooth name prefix (when name is empty)"
+            default "Qwen-GW"
+            help
+                Used only if "Default Bluetooth device name" is empty.
+
+        choice GW_BT_MODE
+            prompt "Default Bluetooth audio mode"
+            default GW_BT_MODE_HFP_AG
+            help
+                Runtime mode can still be changed in the config UI and NVS.
+
+            config GW_BT_MODE_HFP
+                bool "HFP Client (phone)"
+            config GW_BT_MODE_A2DP
+                bool "A2DP Source (speaker)"
+            config GW_BT_MODE_HFP_AG
+                bool "HFP AG (headset)"
+        endchoice
+
+        config GW_BT_AUDIO_DEVICE
+            string "Default target speaker / headset name"
+            default ""
+            help
+                A2DP: connect this speaker (empty = first found).
+                HFP AG: connect this headset (empty = wait for incoming).
+                HFP Client: unused (reconnects by last paired address).
+
+        config GW_BT_AUTO_RECONNECT
+            bool "Default auto-reconnect last paired device"
+            default y
+
+        config GW_BT_WHITELIST
+            bool "Default enable HFP incoming-call whitelist"
+            default n
+            help
+                When on, CLIP numbers found in the phone's synced contacts
+                are not forwarded to Qwen, and audio stays on the phone.
+                Runtime toggle is on the web / BLE config UI (default off).
+
+    endmenu
+
+endmenu

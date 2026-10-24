@@ -1,0 +1,20 @@
+[Unit]
+Description=Qwen Audio Agent Gateway (audio.zhonglele.top)
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=qwaudio
+Group=qwaudio
+WorkingDirectory=/opt/qwen-audio-agent
+Environment=HOST=172.23.0.1
+Environment=PORT=18888
+ExecStart=/usr/local/bin/node server/src/index.mjs
+Restart=always
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

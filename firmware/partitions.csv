@@ -1,0 +1,21 @@
+# Name,     Type, SubType,  Offset,    Size,      Flags
+# Total flash: 8MB (0x800000)
+#
+# Layout:
+#   0x001000  bootloader    (IDF managed)
+#   0x008000  partition table
+#   0x009000  nvs           16 KB
+#   0x00D000  otadata        8 KB   (OTA boot selector)
+#   0x00F000  phy_init       4 KB
+#   0x010000  ota_0          3.5 MB  (primary firmware slot)
+#   0x390000  ota_1          3.5 MB  (upgrade firmware slot)
+#   0x710000  coredump      64 KB
+#   0x720000  nvs_keys       4 KB   (reserved for NVS encryption)
+#
+nvs,      data, nvs,      0x9000,   0x4000,
+otadata,  data, ota,      0xD000,   0x2000,
+phy_init, data, phy,      0xF000,   0x1000,
+ota_0,    app,  ota_0,    0x10000,  0x380000,
+ota_1,    app,  ota_1,    0x390000, 0x380000,
+coredump, data, coredump, 0x710000, 0x10000,
+nvs_keys, data, nvs_keys, 0x720000, 0x1000,

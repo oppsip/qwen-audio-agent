@@ -1,0 +1,15 @@
+[Unit]
+Description=Qwen Audio Agent device relay
+Wants=qwen-audio-gateway.service
+After=qwen-audio-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/qwen-audio-agent/repo
+ExecStart=%h/.local/opt/node-v22.22.2/bin/node --env-file=%h/qwen-audio-agent/deploy/.env.local examples/ai-passport/device-relay.mjs
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=default.target

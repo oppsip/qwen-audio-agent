@@ -44,3 +44,14 @@ sidecars/tsnet/dist/
 docs/.vitepress/dist/
 docs/.vitepress/cache/
 docs/.vitepress/.site/
+
+# ESP32 firmware (ESP-IDF) build artefacts
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/managed_components/
+firmware/dependencies.lock
+
+# Device deployment artefacts (device token, runtime logs)
+deploy/.env.local
+deploy/logs/
