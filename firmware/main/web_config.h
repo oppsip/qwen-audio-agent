@@ -2,6 +2,7 @@
 #define WEB_CONFIG_H
 
 #include "esp_err.h"
+#include "cJSON.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -40,6 +41,34 @@ esp_err_t web_config_register(void);
  */
 web_config_result_t web_config_run_session(web_config_mode_t mode,
                                            uint32_t timeout_ms);
+
+/**
+ * Schema API shared with the BLE config channel (main/ble_config_server.c).
+ *
+ * The BLE transport serves exactly the same { ui, values, contacts } document
+ * the platform session carries, and applies submitted values through the same
+ * web_config_apply_values() path, so the two channels can never drift apart.
+ * A future web field is therefore visible to the mini program with no app
+ * release.
+ *
+ * web_config_json_init() installs the PSRAM-preferred cJSON allocator; the
+ * BLE side must call it once before it parses or prints JSON. The build
+ * functions also call it, so they are safe on their own.
+ *
+ * The cJSON objects returned below are owned by the caller: release them with
+ * cJSON_Delete(). They may be NULL on out-of-memory.
+ */
+void web_config_json_init(void);
+cJSON *web_config_build_ui(void);
+cJSON *web_config_build_values(void);
+cJSON *web_config_build_contacts(void);
+
+/**
+ * Apply a { key: value } map. Keys are the same as build_values(); missing
+ * keys keep the stored value, and an unchanged secret arrives as "" and also
+ * keeps the stored value. "frs":1 resets to factory defaults.
+ */
+esp_err_t web_config_apply_values(const cJSON *values);
 
 #ifdef __cplusplus
 }

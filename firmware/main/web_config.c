@@ -289,8 +289,14 @@ static cJSON *option_item(int value, const char *zh, const char *en)
     return o;
 }
 
-static cJSON *build_ui(void)
+void web_config_json_init(void)
 {
+    json_hooks_init();
+}
+
+cJSON *web_config_build_ui(void)
+{
+    json_hooks_init();
     cJSON *ui = cJSON_CreateObject();
     cJSON *tabs = cJSON_AddArrayToObject(ui, "tabs");
 
@@ -462,8 +468,9 @@ static cJSON *build_ui(void)
     return ui;
 }
 
-static cJSON *build_values(void)
+cJSON *web_config_build_values(void)
 {
+    json_hooks_init();
     const system_config_t *c = config_get();
 
     cJSON *v = cJSON_CreateObject();
@@ -525,8 +532,9 @@ static cJSON *build_scan_object(void)
     return scan;
 }
 
-static cJSON *build_contacts_object(void)
+cJSON *web_config_build_contacts(void)
 {
+    json_hooks_init();
     cJSON *o = cJSON_CreateObject();
     const system_config_t *c = config_get();
     cJSON_AddBoolToObject(o, "enabled", c && c->bt_whitelist);
@@ -583,10 +591,10 @@ static char *build_session_body(web_config_mode_t mode, uint32_t timeout_ms)
                             mode == WEB_CONFIG_MODE_RUNTIME ? "runtime" : "setup");
     cJSON_AddNumberToObject(root, "timeout_sec",
                             timeout_ms == 0 ? 0 : (int)(timeout_ms / 1000));
-    cJSON_AddItemToObject(root, "values", build_values());
-    cJSON_AddItemToObject(root, "ui", build_ui());
+    cJSON_AddItemToObject(root, "values", web_config_build_values());
+    cJSON_AddItemToObject(root, "ui", web_config_build_ui());
     cJSON_AddItemToObject(root, "scan", build_scan_object());
-    cJSON_AddItemToObject(root, "contacts", build_contacts_object());
+    cJSON_AddItemToObject(root, "contacts", web_config_build_contacts());
 
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -599,7 +607,7 @@ static char *build_session_body(web_config_mode_t mode, uint32_t timeout_ms)
     return out;
 }
 
-static esp_err_t apply_values(const cJSON *values)
+esp_err_t web_config_apply_values(const cJSON *values)
 {
     if (!cJSON_IsObject(values)) {
         return ESP_ERR_INVALID_ARG;
@@ -866,7 +874,7 @@ web_config_result_t web_config_run_session(web_config_mode_t mode,
         const char *st = json_str(root, "status");
         if (st && strcmp(st, "submitted") == 0) {
             const cJSON *values = cJSON_GetObjectItemCaseSensitive(root, "values");
-            esp_err_t err = apply_values(values);
+            esp_err_t err = web_config_apply_values(values);
             cJSON_Delete(root);
             if (err == ESP_OK) {
                 ack_session("applied");

@@ -12,13 +12,20 @@
  *   Request (phone → ESP32):  JSON object + '\n', split across MTU-sized writes
  *   Response (ESP32 → phone): JSON object + '\n', split across MTU-sized notifies
  *
- * Supported commands:
+ * Schema commands (firmware owns the field definitions — the mini program only
+ * renders, edits and submits):
+ *   {"cmd":"get_ui"}          → {"ok":true,"fw":"x.y.z","ui":{...},
+ *                                "values":{...},"contacts":{...}}
+ *   {"cmd":"set_config","values":{...}}
+ *                              → {"ok":true}  (values keys match get_ui)
+ *   {"cmd":"get_contacts"}    → {"ok":true,"contacts":{...}}
+ *
+ * Low-level commands (kept for compatibility and factory tooling):
  *   {"cmd":"get_config"}
  *   {"cmd":"set_eth","dhcp":1,"ip":"x","mask":"x","gw":"x","dns":"x"}
  *   {"cmd":"set_wifi","ssid":"x","pwd":"x"}
- *   {"cmd":"set_sip","server":"x","port":5060,"stp":0,"user":"x","pwd":"x","domain":"x"}
+ *   {"cmd":"set_qwen","host":"x","port":3101,"path":"/api/realtime","tok":"x","tls":0}
  *   {"cmd":"set_bt","name":"x","mode":0,"audio_dev":"x","auto_rec":1}
- *   {"cmd":"set_rtp","timeout":30}
  *   {"cmd":"factory_reset"}
  *   {"cmd":"reboot"}
  */
@@ -26,11 +33,14 @@
 #include "ble_config_server.h"
 #include "config_manager.h"
 #include "hfp_client_mgr.h"
+#include "web_config.h"
 
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "cJSON.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_bt.h"
 #include "esp_gap_ble_api.h"
@@ -62,7 +72,8 @@ static bool keep_secret(const char *s)
 #define GATTS_APP_ID         0
 
 #define BLE_CFG_MTU_MAX      200
-#define BLE_CFG_RX_BUF_SIZE  512   /* accumulate fragmented writes */
+#define BLE_CFG_RX_BUF_SIZE  4096  /* accumulate fragmented writes; set_config
+                                    * carries a full {values} object */
 
 enum {
     IDX_SVC,
@@ -198,6 +209,43 @@ static void send_notify(const char *json)
     esp_ble_gatts_send_indicate(s_gatts_if, s_conn_id,
                                 s_handle_table[IDX_CHAR_NOTIFY_VAL],
                                 1, (uint8_t *)s_notify_buf, false);
+}
+
+/* send_notify() paces one frame every 20 ms. A 4-5 KB schema would block the
+ * BTC task for ~0.5 s and could drop the phone's next write, so oversized
+ * responses are handed to a short-lived worker task instead. Takes ownership
+ * of @json (malloc'd). */
+typedef struct {
+    char *json;
+} ble_tx_msg_t;
+
+static void ble_tx_task(void *arg)
+{
+    ble_tx_msg_t *m = (ble_tx_msg_t *)arg;
+    send_notify(m->json);
+    free(m->json);
+    free(m);
+    vTaskDelete(NULL);
+}
+
+static void send_notify_owned(char *json)
+{
+    if (json == NULL) {
+        send_notify("{\"ok\":false,\"err\":\"out of memory\"}");
+        return;
+    }
+    ble_tx_msg_t *m = malloc(sizeof(*m));
+    if (m == NULL) {
+        send_notify(json);          /* best effort: send inline, then free */
+        free(json);
+        return;
+    }
+    m->json = json;
+    if (xTaskCreate(ble_tx_task, "ble_tx", 3072, m, 5, NULL) != pdPASS) {
+        send_notify(json);
+        free(json);
+        free(m);
+    }
 }
 
 /* ============================================================
@@ -364,6 +412,67 @@ static void process_command(const char *json)
         }
         send_notify(err == ESP_OK ? "{\"ok\":true}" :
                                     "{\"ok\":false,\"err\":\"nvs write failed\"}");
+
+    } else if (strcmp(cmd, "get_ui") == 0) {
+        /* The firmware is the single source of truth for tabs, fields, labels
+         * and current values; the phone only renders them. */
+        cJSON *ui = web_config_build_ui();
+        cJSON *vals = web_config_build_values();
+        cJSON *contacts = web_config_build_contacts();
+        cJSON *root = (ui && vals && contacts) ? cJSON_CreateObject() : NULL;
+        if (root == NULL) {
+            cJSON_Delete(ui);
+            cJSON_Delete(vals);
+            cJSON_Delete(contacts);
+            send_notify("{\"ok\":false,\"err\":\"out of memory\"}");
+            return;
+        }
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddStringToObject(root, "fw", esp_app_get_description()->version);
+        cJSON_AddItemToObject(root, "ui", ui);
+        cJSON_AddItemToObject(root, "values", vals);
+        cJSON_AddItemToObject(root, "contacts", contacts);
+        char *out = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        send_notify_owned(out);
+
+    } else if (strcmp(cmd, "set_config") == 0) {
+        /* One atomic submit through the same apply path the web session uses.
+         * Missing keys keep the stored value; an unchanged secret arrives as
+         * "" and also keeps the stored value; "frs":1 resets to defaults. */
+        web_config_json_init();
+        cJSON *root = cJSON_Parse(json);
+        if (root == NULL) {
+            send_notify("{\"ok\":false,\"err\":\"invalid json\"}");
+            return;
+        }
+        cJSON *values = cJSON_GetObjectItemCaseSensitive(root, "values");
+        esp_err_t err = web_config_apply_values(values);
+        cJSON_Delete(root);
+        if (err == ESP_OK) {
+            send_notify("{\"ok\":true}");
+            vTaskDelay(pdMS_TO_TICKS(300));  /* let notify flush */
+            xEventGroupSetBits(s_evt_group, BIT_REBOOT_REQUESTED);
+        } else {
+            char err_buf[64];
+            snprintf(err_buf, sizeof(err_buf),
+                     "{\"ok\":false,\"err\":\"%s\"}", esp_err_to_name(err));
+            send_notify(err_buf);
+        }
+
+    } else if (strcmp(cmd, "get_contacts") == 0) {
+        cJSON *contacts = web_config_build_contacts();
+        cJSON *root = contacts ? cJSON_CreateObject() : NULL;
+        if (root == NULL) {
+            cJSON_Delete(contacts);
+            send_notify("{\"ok\":false,\"err\":\"out of memory\"}");
+            return;
+        }
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddItemToObject(root, "contacts", contacts);
+        char *out = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+        send_notify_owned(out);
 
     } else if (strcmp(cmd, "factory_reset") == 0) {
         config_reset_defaults();
